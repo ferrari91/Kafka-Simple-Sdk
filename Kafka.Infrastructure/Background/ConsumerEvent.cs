@@ -1,67 +1,93 @@
 ﻿using Confluent.Kafka;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
-using Microsoft.Extensions.Logging;
+using Polly;
 
 namespace Kafka.Sdk.Background
 {
     public abstract class ConsumerEvent<TConsumer, TEvent> : BackgroundService
     {
+        private readonly IServiceScope _scope;
         private readonly IServiceProvider _serviceProvider;
+        private int _retryCount = 0;
 
         public ConsumerEvent(IServiceProvider serviceProvider)
         {
+            _scope = serviceProvider.CreateScope();
             _serviceProvider = serviceProvider;
+
             ConsumeResult = new ConsumeResult<string, TEvent>();
         }
 
-        protected Task? TaskExecuting;
-        protected ConsumeResult<string, TEvent> ConsumeResult { get; private set; }
-        protected virtual IConsumer<string, TEvent> Consumer => throw new NotImplementedException();
-        protected virtual string Topic => throw new NotImplementedException();
-
-        private async Task InternalExecuteAsync(CancellationToken ctx)
-        {
-            await Task.Yield();
-
-            using (var consumer = Consumer)
+        protected override async Task ExecuteAsync(CancellationToken stoppingToken) => await Policy
+            .Handle<Exception>()
+            .RetryForeverAsync(_ =>
             {
-                consumer.Subscribe(Topic);
-                while (true)
+                Task.Delay(TimeSpan.FromSeconds(3)).Wait();
+            })
+            .ExecuteAsync(async () =>
+            {
+                using (var consumer = Consumer)
                 {
-                    try
+                    consumer.Subscribe(Topic);
+                    while (!stoppingToken.IsCancellationRequested)
                     {
-                        var consumeResult = consumer.Consume();
-                        if (consumeResult != null)
+                        var message = consumer.Consume();
+                        if (message is not null)
                         {
-                            ConsumeResult = consumeResult;
-                            using (var scope = _serviceProvider.CreateScope())
-                            {
-                                await ExecuteAsync(ctx);
-                            }
+                            await OnEventAsync(message, stoppingToken);
+                            consumer.Commit(message);
                         }
-                        consumer.Commit(consumeResult);
                     }
-                    catch (Exception ex)
-                    {
-                        await OnExceptionAsync(ex);
-                    }
-                    finally
-                    {
-                    }
+                }
+            });
+
+        private async Task OnEventAsync(ConsumeResult<string, TEvent> message, CancellationToken cancellationToken)
+        {
+            try
+            {
+                await OnConsumerAsync(message.Value, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                await OnExceptionAsync(ex, message.Value, cancellationToken);
+                
+                if (_retryCount < Attempts)
+                    _retryCount++;
+                else
+                {
+                    await MoveToDeadLetterQueueAsync(message.Value, cancellationToken);
+                    _retryCount = 0;
                 }
             }
         }
-
-        public override Task StartAsync(CancellationToken cancellationToken)
+        private async Task MoveToDeadLetterQueueAsync(TEvent message, CancellationToken cancellationToken)
         {
-            TaskExecuting = InternalExecuteAsync(cancellationToken);
-            while (TaskExecuting.IsCompleted)
-                return TaskExecuting;
+            var config = new ProducerConfig { BootstrapServers = BootstrapServers };
+            
+            using (var producer = new ProducerBuilder<string, TEvent>(config)
+                 .SetValueSerializer(new CustomSerializer<TEvent>())
+                 .Build())
+            {
+                var deadTopic = new Message<string, TEvent>
+                {
+                    Key = Guid.NewGuid().ToString(),
+                    Value = message
+                };
 
-            return Task.CompletedTask;
+                await producer.ProduceAsync(Topic + "_dead", deadTopic);
+            }
         }
 
-        public virtual Task OnExceptionAsync(Exception ex) => throw new NotImplementedException();
+
+        protected ConsumeResult<string, TEvent> ConsumeResult { get; private set; }
+        protected virtual IConsumer<string, TEvent> Consumer => throw new NotImplementedException();
+        protected virtual string Topic => "_topic";
+        protected virtual string BootstrapServers => "_bootstrapServers";
+        protected virtual int Attempts => 3;
+       
+
+        public virtual async Task OnConsumerAsync(TEvent message, CancellationToken cancellationToken) => await Task.CompletedTask;
+        public virtual async Task OnExceptionAsync(Exception ex, TEvent message, CancellationToken cancellationToken) => await Task.CompletedTask;
     }
 }

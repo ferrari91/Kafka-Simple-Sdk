@@ -1,13 +1,10 @@
 ﻿using Confluent.Kafka;
-using Confluent.SchemaRegistry;
-using Confluent.SchemaRegistry.Serdes;
 
 namespace Kafka.Sdk
 {
     public abstract class KafkaProduce<TEvent> : IDisposable
     {
         protected virtual string BootstrapServers => throw new NotImplementedException();
-        protected virtual string SchemaRegistryUrl => throw new NotImplementedException();
         protected virtual string Topic => throw new NotImplementedException();
 
         private IProducer<string, TEvent> Producer
@@ -15,13 +12,9 @@ namespace Kafka.Sdk
             get
             {
                 var config = new ProducerConfig { BootstrapServers = BootstrapServers };
-
-                var schemaRegistry = new CachedSchemaRegistryClient(new SchemaRegistryConfig { Url = SchemaRegistryUrl });
-                var producer = new ProducerBuilder<string, TEvent>(config)
-                    .SetValueSerializer(new AvroSerializer<TEvent>(schemaRegistry))
+                return new ProducerBuilder<string, TEvent>(config)
+                    .SetValueSerializer(new CustomSerializer<TEvent>())
                     .Build();
-
-                return producer;
             }
         }
 
@@ -30,7 +23,7 @@ namespace Kafka.Sdk
             Producer.Dispose();
         }
 
-        public async Task Produce(TEvent value)
+        protected async Task Produce(TEvent value)
         {
             var message = new Message<string, TEvent>
             {

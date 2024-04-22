@@ -1,16 +1,17 @@
 ﻿using Confluent.Kafka;
-using Confluent.Kafka.SyncOverAsync;
-using Confluent.SchemaRegistry;
-using Confluent.SchemaRegistry.Serdes;
 using Kafka.Sdk.Background;
+using Microsoft.Extensions.Options;
 
 namespace Kafka.Sdk
 {
     public class KafkaConsumeService<TConsumer, TEvent> : ConsumerEvent<TConsumer, TEvent>
     {
-        protected virtual string BootstrapServers => throw new NotImplementedException();
-        protected virtual string SchemaRegistryUrl => throw new NotImplementedException();
-        protected virtual string GroupId => throw new NotImplementedException();
+
+        public KafkaConsumeService(IServiceProvider serviceProvider) : base(serviceProvider)
+        {
+        }
+
+        protected virtual string GroupId => "_groupId";
 
         protected override IConsumer<string, TEvent> Consumer
         {
@@ -23,22 +24,12 @@ namespace Kafka.Sdk
                     AutoOffsetReset = AutoOffsetReset.Earliest
                 };
 
-                var schemaRegistry = new CachedSchemaRegistryClient(new SchemaRegistryConfig { Url = SchemaRegistryUrl });
                 var consumer = new ConsumerBuilder<string, TEvent>(config)
-                    .SetValueDeserializer(new AvroDeserializer<TEvent>(schemaRegistry).AsSyncOverAsync())
+                    .SetValueDeserializer(new CustomDeserializer<TEvent>())
                     .Build();
 
                 return consumer;
             }
-        }
-
-        public KafkaConsumeService(IServiceProvider serviceProvider) : base(serviceProvider)
-        {
-        }
-
-        protected override Task ExecuteAsync(CancellationToken stoppingToken)
-        {
-            throw new NotImplementedException();
         }
     }
 }
